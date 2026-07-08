@@ -11,7 +11,7 @@ from airflow.operators.python import PythonOperator
 
 
 PROJECT_DIR = Path(os.getenv("COMPANY_JOB_ANALYZER_PROJECT_DIR", Path(__file__).resolve().parents[2]))
-INPUT_CSV = os.getenv("AIRFLOW_JOB_ANALYZER_INPUT", str(PROJECT_DIR / "company_job_analyzer" / "data" / "job_urls.csv"))
+INPUT_CSV = os.getenv("AIRFLOW_JOB_ANALYZER_INPUT")
 
 
 def run_company_job_analyzer() -> None:
@@ -19,9 +19,9 @@ def run_company_job_analyzer() -> None:
         sys.executable,
         "-m",
         "company_job_analyzer.main",
-        "--input",
-        INPUT_CSV,
     ]
+    if INPUT_CSV:
+        command.extend(["--input", INPUT_CSV])
     if os.getenv("AIRFLOW_JOB_ANALYZER_SEND_KAKAO", "false").lower() == "true":
         command.append("--send-kakao")
     if os.getenv("AIRFLOW_JOB_ANALYZER_USE_LLM", "false").lower() == "true":

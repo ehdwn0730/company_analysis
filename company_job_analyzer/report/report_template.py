@@ -1,31 +1,81 @@
 from __future__ import annotations
 
+import textwrap
 from xml.sax.saxutils import escape
 
-from company_job_analyzer.schema.job_posting_schema import CompanyReport, ExtractedItem
+from company_job_analyzer.normalizer.item_summarizer import summarize_items
+from company_job_analyzer.schema.job_posting_schema import ExtractedItem, RunReport
 
 
-def bullet_lines(items: list[ExtractedItem]) -> str:
-    if not items:
-        return "- 추출된 항목 없음"
-    return "<br/><br/>".join(
-        f"- {escape(item.text)}<br/><font size='8'>근거: {escape(item.evidence_sentence)}</font>"
-        for item in items
+MAX_CHUNK_CHARS = 650
+MAX_ITEMS_PER_CHUNK = 4
+MAX_SINGLE_ITEM_CHARS = 500
+
+
+def _split_long_text(text: str) -> list[str]:
+    text = " ".join(text.split())
+    if len(text) <= MAX_SINGLE_ITEM_CHARS:
+        return [text]
+    return textwrap.wrap(
+        text,
+        width=MAX_SINGLE_ITEM_CHARS,
+        break_long_words=True,
+        break_on_hyphens=False,
     )
 
 
-def build_pdf_story_html(report: CompanyReport) -> list[tuple[str, str]]:
-    story: list[tuple[str, str]] = [("title", f"{escape(report.company)} 채용공고 분석 리포트")]
+def _item_lines(items: list[ExtractedItem]) -> list[str]:
+    lines: list[str] = []
+    for summary in summarize_items(items):
+        parts = _split_long_text(summary)
+        for index, part in enumerate(parts):
+            prefix = "- " if index == 0 else "  "
+            suffix = " (계속)" if index < len(parts) - 1 else ""
+            lines.append(f"{prefix}{escape(part)}{suffix}")
+    return lines or ["-"]
+
+
+def _chunk_lines(lines: list[str]) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        if current and (
+            len(current) >= MAX_ITEMS_PER_CHUNK
+            or current_len + len(line) > MAX_CHUNK_CHARS
+        ):
+            chunks.append("<br/>".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += len(line)
+
+    if current:
+        chunks.append("<br/>".join(current))
+    return chunks or ["-"]
+
+
+def _items_chunks(items: list[ExtractedItem]) -> list[str]:
+    return _chunk_lines(_item_lines(items))
+
+
+def build_report_table_rows(report: RunReport) -> list[list[str]]:
+    rows: list[list[str]] = [["회사 이름", "채용 직무", "주요업무", "자격요건", "우대사항"]]
     for posting in report.postings:
-        story.append(("heading", escape(posting.job_title or "직무명 미상")))
-        story.append(("meta", f"URL: {escape(str(posting.url))}"))
-        summary = posting.normalized_summary
-        story.append(("body", f"기술스택: {escape(', '.join(summary.skills) or '-')}"))
-        story.append(("body", f"최소 경력: {summary.min_career_years if summary.min_career_years is not None else '-'}"))
-        story.append(("body", f"학력: {escape(summary.education or '-')}"))
-        story.append(("body", f"지역: {escape(', '.join(summary.locations) or '-')}"))
-        story.append(("subheading", "지원자격"))
-        story.append(("html", bullet_lines(posting.requirements)))
-        story.append(("subheading", "우대조건"))
-        story.append(("html", bullet_lines(posting.preferences)))
-    return story
+        main_task_chunks = _items_chunks(posting.main_tasks)
+        requirement_chunks = _items_chunks(posting.requirements)
+        preference_chunks = _items_chunks(posting.preferences)
+        row_count = max(len(main_task_chunks), len(requirement_chunks), len(preference_chunks))
+
+        for row_index in range(row_count):
+            rows.append(
+                [
+                    escape(posting.company) if row_index == 0 else "",
+                    escape(posting.job_title or "직무명 미상") if row_index == 0 else "(계속)",
+                    main_task_chunks[row_index] if row_index < len(main_task_chunks) else "",
+                    requirement_chunks[row_index] if row_index < len(requirement_chunks) else "",
+                    preference_chunks[row_index] if row_index < len(preference_chunks) else "",
+                ]
+            )
+    return rows

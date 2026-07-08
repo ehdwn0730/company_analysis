@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
-from collections import defaultdict
 from pathlib import Path
 
 from company_job_analyzer.config.settings import settings
@@ -14,7 +12,9 @@ from company_job_analyzer.crawler.job_url_collector import collect_from_csv
 from company_job_analyzer.crawler.robots_checker import can_fetch
 from company_job_analyzer.crawler.target_loader import load_targets, parse_targets
 from company_job_analyzer.crawler.url_deduplicator import deduplicate_job_urls
+from company_job_analyzer.crawler.wanted_client import collect_wanted_job_urls, fetch_wanted_detail
 from company_job_analyzer.extractor.llm_item_classifier import classify_items_with_fallback
+from company_job_analyzer.extractor.main_task_extractor import extract_main_tasks
 from company_job_analyzer.extractor.preference_extractor import extract_preferences
 from company_job_analyzer.extractor.requirement_extractor import extract_requirements
 from company_job_analyzer.messenger.kakao_sender import send_pdf_link_to_me
@@ -25,16 +25,11 @@ from company_job_analyzer.normalizer.skill_normalizer import normalize_skills
 from company_job_analyzer.parser.html_cleaner import clean_html
 from company_job_analyzer.parser.section_splitter import split_sections
 from company_job_analyzer.parser.text_extractor import extract_text
-from company_job_analyzer.report.pdf_renderer import build_download_link, render_company_pdf
-from company_job_analyzer.schema.job_posting_schema import CompanyReport, JobPosting, NormalizedSummary
+from company_job_analyzer.report.pdf_renderer import build_download_link, render_run_pdf
+from company_job_analyzer.schema.job_posting_schema import JobPosting, JobUrlInput, NormalizedSummary, RunReport
 from company_job_analyzer.storage.url_csv_writer import write_job_url_csv
 from company_job_analyzer.validator.quality_checker import quality_warnings
 from company_job_analyzer.validator.schema_validator import validate_posting
-
-
-def _safe_name(value: str) -> str:
-    return re.sub(r"[^0-9A-Za-z\uAC00-\uD7A3_.-]+", "_", value).strip("_") or "company"
-
 
 def setup_logging() -> None:
     settings.ensure_dirs()
@@ -50,33 +45,32 @@ def setup_logging() -> None:
     )
 
 
-def analyze_one(
+def _build_posting_from_text(
     company: str,
     url: str,
     job_title: str | None,
     keyword: str | None,
     source: str | None,
-    ignore_robots: bool,
     use_llm: bool,
+    text: str,
+    main_tasks_text: str | None = None,
+    requirements_text: str | None = None,
+    preferences_text: str | None = None,
 ) -> JobPosting:
     logger = logging.getLogger("analyze")
-    if not ignore_robots and not can_fetch(url, settings.user_agent):
-        raise PermissionError(f"robots.txt disallows fetching: {url}")
+    if main_tasks_text is None or requirements_text is None or preferences_text is None:
+        sections = split_sections(text)
+        main_tasks_text = sections.main_tasks
+        requirements_text = sections.requirements
+        preferences_text = sections.preferences
 
-    html = fetch_html(
-        url,
-        user_agent=settings.user_agent,
-        timeout_sec=settings.request_timeout_sec,
-        retry_count=settings.request_retry_count,
-    )
-    text = extract_text(clean_html(html))
-    sections = split_sections(text)
-    requirements = extract_requirements(sections.requirements, text)
-    preferences = extract_preferences(sections.preferences, text)
+    main_tasks = extract_main_tasks(main_tasks_text or "", text)
+    requirements = extract_requirements(requirements_text or "", text)
+    preferences = extract_preferences(preferences_text or "", text)
     if use_llm:
         requirements, preferences = classify_items_with_fallback(text, requirements, preferences)
 
-    item_texts = [item.text for item in [*requirements, *preferences]]
+    item_texts = [item.text for item in [*main_tasks, *requirements, *preferences]]
     posting = JobPosting(
         company=company,
         job_title=job_title,
@@ -84,6 +78,7 @@ def analyze_one(
         source=source,
         url=url,
         raw_text=text,
+        main_tasks=main_tasks,
         requirements=requirements,
         preferences=preferences,
         normalized_summary=NormalizedSummary(
@@ -97,6 +92,43 @@ def analyze_one(
     for warning in quality_warnings(posting):
         logger.warning("%s %s - %s", company, url, warning)
     return posting
+
+
+def analyze_one(
+    company: str,
+    url: str,
+    job_title: str | None,
+    keyword: str | None,
+    source: str | None,
+    ignore_robots: bool,
+    use_llm: bool,
+) -> JobPosting:
+    if source == "wanted":
+        wanted_detail = fetch_wanted_detail(url)
+        return _build_posting_from_text(
+            company=wanted_detail.company or company,
+            url=url,
+            job_title=wanted_detail.job_title or job_title,
+            keyword=keyword,
+            source=source,
+            use_llm=use_llm,
+            text=wanted_detail.raw_text,
+            main_tasks_text=wanted_detail.main_tasks_text,
+            requirements_text=wanted_detail.requirements_text,
+            preferences_text=wanted_detail.preferences_text,
+        )
+
+    if not ignore_robots and not can_fetch(url, settings.user_agent):
+        raise PermissionError(f"robots.txt disallows fetching: {url}")
+
+    html = fetch_html(
+        url,
+        user_agent=settings.user_agent,
+        timeout_sec=settings.request_timeout_sec,
+        retry_count=settings.request_retry_count,
+    )
+    text = extract_text(clean_html(html))
+    return _build_posting_from_text(company, url, job_title, keyword, source, use_llm, text)
 
 
 def collect_urls(
@@ -120,19 +152,19 @@ def collect_urls(
     return output_csv
 
 
-def run(
-    input_csv: Path,
+def run_items(
+    inputs: list[JobUrlInput],
     send_kakao: bool,
     ignore_robots: bool,
     limit: int | None,
     use_llm: bool,
-) -> list[CompanyReport]:
+) -> list[RunReport]:
     logger = logging.getLogger("main")
-    inputs = deduplicate_job_urls(collect_from_csv(input_csv))
+    inputs = deduplicate_job_urls(inputs)
     if limit:
         inputs = inputs[:limit]
 
-    grouped: dict[str, list[JobPosting]] = defaultdict(list)
+    postings: list[JobPosting] = []
     failures: list[dict[str, str]] = []
     for item in inputs:
         try:
@@ -146,28 +178,27 @@ def run(
                 ignore_robots,
                 use_llm,
             )
-            grouped[item.company].append(posting)
+            postings.append(posting)
         except Exception as exc:
             logger.exception("failed %s %s", item.company, item.url)
             failures.append({"company": item.company, "url": str(item.url), "error": str(exc)})
 
-    reports: list[CompanyReport] = []
-    for company, postings in grouped.items():
-        safe_company = _safe_name(company)
-        report = CompanyReport(company=company, postings=postings)
-        pdf_path = settings.output_dir / f"{safe_company}.pdf"
+    reports: list[RunReport] = []
+    if postings:
+        report = RunReport(title="원티드 데이터 사이언티스트 채용공고 분석 리포트", postings=postings)
+        pdf_path = settings.output_dir / "wanted_data_scientist_report.pdf"
 
-        render_company_pdf(report, pdf_path)
+        render_run_pdf(report, pdf_path)
         report.pdf_path = str(pdf_path)
         report.download_link = build_download_link(pdf_path, settings.public_download_base_url)
         reports.append(report)
 
         if send_kakao:
             if not settings.kakao_access_token:
-                logger.warning("KAKAO_ACCESS_TOKEN is missing. Skip Kakao send for %s.", company)
+                logger.warning("KAKAO_ACCESS_TOKEN is missing. Skip Kakao send.")
             else:
-                send_pdf_link_to_me(settings.kakao_access_token, company, report.download_link)
-                logger.info("sent Kakao message for %s", company)
+                send_pdf_link_to_me(settings.kakao_access_token, report.title, report.download_link)
+                logger.info("sent Kakao message for %s", report.title)
 
     if failures:
         logger.warning("%d URL(s) failed.", len(failures))
@@ -177,9 +208,25 @@ def run(
     return reports
 
 
+def run(
+    input_csv: Path,
+    send_kakao: bool,
+    ignore_robots: bool,
+    limit: int | None,
+    use_llm: bool,
+) -> list[RunReport]:
+    return run_items(
+        collect_from_csv(input_csv),
+        send_kakao=send_kakao,
+        ignore_robots=ignore_robots,
+        limit=limit,
+        use_llm=use_llm,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Company job posting analyzer")
-    parser.add_argument("--input", default=str(settings.data_dir / "job_urls.csv"), help="CSV with company,url,job_title,keyword")
+    parser.add_argument("--input", default=None, help="Optional CSV with company,url,job_title,keyword. If omitted, Wanted data scientist list is analyzed.")
     parser.add_argument("--collect-urls", action="store_true", help="Collect job URLs before analysis")
     parser.add_argument("--targets-csv", default=None, help="CSV with company,keyword for automatic URL collection")
     parser.add_argument("--companies", default=None, help="Comma-separated company names for URL collection")
@@ -197,7 +244,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_logging()
-    input_csv = Path(args.input)
+
     if args.collect_urls:
         input_csv = collect_urls(
             targets_csv=Path(args.targets_csv) if args.targets_csv else None,
@@ -209,6 +256,20 @@ def main() -> None:
         )
         if args.collect_only:
             return
+    elif args.input:
+        input_csv = Path(args.input)
+    else:
+        wanted_inputs = collect_wanted_job_urls(settings.wanted_list_url, max_items=args.limit)
+        reports = run_items(
+            wanted_inputs,
+            send_kakao=args.send_kakao or settings.send_kakao,
+            ignore_robots=True,
+            limit=None,
+            use_llm=args.use_llm,
+        )
+        for report in reports:
+            logging.getLogger("main").info("generated %s -> %s", report.title, report.download_link)
+        return
 
     reports = run(
         input_csv,
@@ -218,7 +279,7 @@ def main() -> None:
         use_llm=args.use_llm,
     )
     for report in reports:
-        logging.getLogger("main").info("generated %s -> %s", report.company, report.download_link)
+        logging.getLogger("main").info("generated %s -> %s", report.title, report.download_link)
 
 
 if __name__ == "__main__":

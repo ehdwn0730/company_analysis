@@ -16,6 +16,7 @@ class Settings:
     output_dir: Path = ROOT_DIR / "output"
     log_dir: Path = ROOT_DIR / "logs"
     sites_yaml: Path = ROOT_DIR / "config" / "sites.yaml"
+    wanted_list_url: str = "https://www.wanted.co.kr/wdlist/518/1024?country=kr&job_sort=job.popularity_order&years=-1&locations=all"
     user_agent: str = os.getenv(
         "JOB_ANALYZER_USER_AGENT",
         "CompanyJobAnalyzerMVP/0.1 (+https://example.local)",

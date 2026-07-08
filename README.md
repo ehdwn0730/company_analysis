@@ -26,11 +26,29 @@ python -m company_job_analyzer.main --input company_job_analyzer/data/job_urls.c
 기본 산출물은 PDF와 로그입니다.
 
 ```text
-company_job_analyzer/output/회사명.pdf
+company_job_analyzer/output/wanted_data_scientist_report.pdf
 company_job_analyzer/logs/run.log
 ```
 
 ## 2. 자동 URL 수집
+
+### 원티드 데이터 사이언티스트 전체 공고
+
+원티드의 `직군: 채용공고 -> 직무: 데이터 사이언티스트` 리스트 URL에서 전체 공고를 수집하고 회사별 PDF를 생성합니다.
+
+```bash
+python -m company_job_analyzer.main
+```
+
+처음에는 일부만 테스트할 수 있습니다.
+
+```bash
+python -m company_job_analyzer.main --limit 3
+```
+
+VS Code/Cursor에서는 Run and Debug에서 `원티드: 데이터 사이언티스트 전체 PDF`를 선택하면 됩니다.
+
+### 검색 기반 URL 수집
 
 회사와 직무 키워드 조합으로 검색 URL을 만들고, 검색 결과에서 채용공고로 보이는 링크를 수집합니다.
 
@@ -130,9 +148,15 @@ set AIRFLOW_JOB_ANALYZER_IGNORE_ROBOTS=true
 
 ## 산출물
 
+PDF는 표 형식이며 컬럼은 아래와 같습니다. `주요업무`, `자격요건`, `우대사항`은 원문 전체가 아니라 공고별 핵심 문장으로 요약되어 들어갑니다.
+
+```text
+회사 이름 | 채용 직무 | 주요업무 | 자격요건 | 우대사항
+```
+
 ```text
 company_job_analyzer/output/
-└── 회사명.pdf
+└── wanted_data_scientist_report.pdf
 ```
 
 로그:

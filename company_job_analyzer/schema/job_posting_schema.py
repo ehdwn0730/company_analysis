@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, HttpUrl
 
 
 class ItemCategory(str, Enum):
+    MAIN_TASK = "main_task"
     REQUIREMENT = "requirement"
     PREFERENCE = "preference"
 
@@ -43,13 +44,14 @@ class JobPosting(BaseModel):
     url: HttpUrl
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     raw_text: str
+    main_tasks: list[ExtractedItem] = Field(default_factory=list)
     requirements: list[ExtractedItem] = Field(default_factory=list)
     preferences: list[ExtractedItem] = Field(default_factory=list)
     normalized_summary: NormalizedSummary = Field(default_factory=NormalizedSummary)
 
 
-class CompanyReport(BaseModel):
-    company: str
+class RunReport(BaseModel):
+    title: str = "채용공고 분석 리포트"
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     postings: list[JobPosting] = Field(default_factory=list)
     pdf_path: str | None = None
