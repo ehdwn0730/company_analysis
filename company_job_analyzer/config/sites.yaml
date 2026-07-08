@@ -1,0 +1,17 @@
+default:
+  obey_robots_txt: true
+  request_interval_sec: 1.0
+  allowed_domains: []
+
+sites:
+  generic:
+    search_url_templates:
+      - "https://www.google.com/search?q={company}+{keyword}+채용공고"
+    job_link_patterns:
+      - "job"
+      - "recruit"
+      - "career"
+      - "채용"
+    exclude_link_patterns:
+      - "google.com"
+      - "webcache"
